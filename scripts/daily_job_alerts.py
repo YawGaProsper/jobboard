@@ -184,21 +184,29 @@ def extract_jobs_from_email(html_body: str, subject: str) -> list[dict]:
     """
     Parse LinkedIn job alert email HTML to extract individual job listings.
     LinkedIn emails encode jobs as:
-      <a class="font-bold ...">Job Title</a>
+      <a class="font-bold ..." href="linkedin.com/jobs/view/...">Job Title</a>
       <p ...>Company &middot; Location (WorkType)</p>
     """
     jobs = []
     a_pattern = re.compile(
-        r'<a\s[^>]*class="[^"]*font-bold[^"]*"[^>]*>(.*?)</a>',
+        r'<a\s([^>]*class="[^"]*font-bold[^"]*"[^>]*)>(.*?)</a>',
         re.DOTALL | re.IGNORECASE,
     )
 
     for m_a in a_pattern.finditer(html_body):
-        title = strip_tags(m_a.group(1))
+        attrs = m_a.group(1)
+        title = strip_tags(m_a.group(2))
         if not title or len(title) < 5 or len(title) > 100:
             continue
         if any(s in title.lower() for s in ["see all", "apply", "linkedin", "manage", "get the"]):
             continue
+
+        # Extract and clean the LinkedIn job URL from the href attribute
+        href_m = re.search(r'href="([^"]+)"', attrs)
+        raw_url = html_mod.unescape(href_m.group(1)) if href_m else ""
+        # Normalise to a clean linkedin.com/jobs/view/{id}/ URL
+        job_id_m = re.search(r'/jobs/view/(\d+)', raw_url)
+        link = f"https://www.linkedin.com/jobs/view/{job_id_m.group(1)}/" if job_id_m else raw_url
 
         rest = html_body[m_a.end(): m_a.end() + 1500]
 
@@ -234,6 +242,7 @@ def extract_jobs_from_email(html_body: str, subject: str) -> list[dict]:
             "location": location,
             "worktype": worktype,
             "salary": salary,
+            "link": link,
             "source_email": subject,
         })
 
@@ -380,36 +389,48 @@ def html_to_pdf(html_path: Path, pdf_path: Path) -> None:
 # Email digest
 # ---------------------------------------------------------------------------
 def send_digest(qualifying_jobs: list[dict], cv_map: dict, today: str) -> None:
-    """Send HTML email digest with job table and generated CV list."""
+    """Send HTML email digest with job table, apply links, and generated CV list."""
+    import sys
+    sys.path.insert(0, str(BASE_DIR))
     from scripts.send_email import send_alert
 
     cv_rows = ""
     for job in qualifying_jobs:
         key = (job["title"], job["company"])
         cv_file = cv_map.get(key, "")
-        if cv_file:
-            cv_rows += f"""<tr style="background:#eaf4fb;font-weight:bold;">
-  <td>{job['title']}</td><td>{job['company']}</td>
-  <td>{job['location']}</td><td>{job['worktype'] or '?'}</td>
-  <td>{job['salary'] or '—'}</td><td>{cv_file}</td>
-</tr>\n"""
-        else:
-            cv_rows += f"""<tr>
-  <td>{job['title']}</td><td>{job['company']}</td>
-  <td>{job['location']}</td><td>{job['worktype'] or '?'}</td>
-  <td>{job['salary'] or '—'}</td><td>—</td>
-</tr>\n"""
+        link = job.get("link", "")
+        apply_cell = f'<a href="{link}" style="color:#0a66c2;font-weight:bold;">Apply →</a>' if link else "—"
+        row_style = ' style="background:#eaf4fb;"' if cv_file else ""
+        cv_cell = f'<span style="font-weight:bold;">{cv_file}</span>' if cv_file else "—"
+        cv_rows += (
+            f'<tr{row_style}>'
+            f'<td>{job["title"]}</td>'
+            f'<td>{job["company"]}</td>'
+            f'<td>{job["location"]}</td>'
+            f'<td>{job["worktype"] or "?"}</td>'
+            f'<td>{job["salary"] or "—"}</td>'
+            f'<td>{cv_cell}</td>'
+            f'<td>{apply_cell}</td>'
+            f'</tr>\n'
+        )
 
     html_body = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
-<style>body{{font-family:Arial,sans-serif;font-size:13px;color:#1a1a1a;max-width:700px;margin:auto}}
-h1{{font-size:20px;color:#1a5276}}h2{{font-size:14px;color:#1a5276;border-bottom:1px solid #1a5276;padding-bottom:3px;margin-top:20px}}
-table{{width:100%;border-collapse:collapse;margin-top:8px}}th{{background:#1a5276;color:#fff;padding:7px 10px;text-align:left;font-size:12px}}
-td{{padding:6px 10px;border-bottom:1px solid #e0e0e0;font-size:12px}}tr:nth-child(even){{background:#f5f8fa}}</style>
+<style>
+body{{font-family:Arial,sans-serif;font-size:13px;color:#1a1a1a;max-width:780px;margin:auto}}
+h1{{font-size:20px;color:#1a5276}}
+h2{{font-size:14px;color:#1a5276;border-bottom:1px solid #1a5276;padding-bottom:3px;margin-top:20px}}
+table{{width:100%;border-collapse:collapse;margin-top:8px}}
+th{{background:#1a5276;color:#fff;padding:7px 10px;text-align:left;font-size:12px}}
+td{{padding:6px 10px;border-bottom:1px solid #e0e0e0;font-size:12px;vertical-align:top}}
+tr:nth-child(even){{background:#f5f8fa}}
+a{{color:#0a66c2}}
+</style>
 </head><body>
 <h1>LinkedIn Job Alerts Digest — {today}</h1>
-<p>Filter: London area · Remote &amp; Hybrid only · {len(qualifying_jobs)} qualifying jobs · {len(cv_map)} CVs generated</p>
+<p>Filter: London area · Remote &amp; Hybrid only · <strong>{len(qualifying_jobs)} qualifying jobs</strong> · <strong>{len(cv_map)} CVs generated</strong></p>
 <h2>Qualifying Jobs</h2>
-<table><tr><th>Title</th><th>Company</th><th>Location</th><th>Type</th><th>Salary</th><th>CV</th></tr>
+<table>
+<tr><th>Title</th><th>Company</th><th>Location</th><th>Type</th><th>Salary</th><th>CV File</th><th>Apply</th></tr>
 {cv_rows}</table>
 <br><p style="font-size:11px;color:#888;">Generated by daily_job_alerts.py · cvs/{today}/</p>
 </body></html>"""
@@ -418,12 +439,15 @@ td{{padding:6px 10px;border-bottom:1px solid #e0e0e0;font-size:12px}}tr:nth-chil
     for job in qualifying_jobs:
         key = (job["title"], job["company"])
         cv = cv_map.get(key, "")
+        link = job.get("link", "")
         text_body += f"• {job['title']} — {job['company']} · {job['location']} ({job['worktype'] or '?'})"
         if job.get("salary"):
             text_body += f"  [{job['salary']}]"
         if cv:
-            text_body += f"\n  → CV: {cv}"
-        text_body += "\n"
+            text_body += f"\n  → CV:    {cv}"
+        if link:
+            text_body += f"\n  → Apply: {link}"
+        text_body += "\n\n"
 
     send_alert(
         subject=f"LinkedIn Job Alerts — {today} ({len(cv_map)} CVs generated)",
