@@ -1,0 +1,84 @@
+name: Daily LinkedIn Job Alerts
+
+on:
+  schedule:
+    # 07:00 UTC = 08:00 BST (summer) / 07:00 GMT (winter) — London morning
+    - cron: "0 7 * * *"
+  workflow_dispatch:  # allow manual trigger from GitHub Actions tab
+
+jobs:
+  process-alerts:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: claude/focused-rubin-AIYyM
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies for WeasyPrint
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libpango-1.0-0 libpangoft2-1.0-0 libpangocairo-1.0-0 \
+            libcairo2 libgdk-pixbuf2.0-0 libffi-dev \
+            libxml2 libxslt1.1 shared-mime-info
+
+      - name: Install Python dependencies
+        run: |
+          pip install --quiet \
+            weasyprint \
+            anthropic \
+            google-auth \
+            google-auth-oauthlib \
+            google-auth-httplib2 \
+            google-api-python-client \
+            requests
+
+      - name: Write Gmail credentials
+        env:
+          GMAIL_CREDENTIALS_JSON: ${{ secrets.GMAIL_CREDENTIALS_JSON }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+        run: |
+          echo "$GMAIL_CREDENTIALS_JSON" > .gmail_credentials.json
+          echo "$GMAIL_TOKEN_JSON" > .gmail_token.json
+
+      - name: Write .env
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: |
+          echo "RESEND_API_KEY=$RESEND_API_KEY" > .env
+
+      - name: Run daily job alert pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 scripts/daily_job_alerts.py
+
+      - name: Commit and push new CVs
+        run: |
+          git config user.name "Prosper Awuni (Job Board Bot)"
+          git config user.email "prosper.awuni@gmail.com"
+          git add cvs/
+          # Only commit if there are new CVs
+          if ! git diff --cached --quiet; then
+            DATE=$(date +%Y-%m-%d)
+            git commit -m "Add tailored CVs for $DATE job alerts"
+            git push origin claude/focused-rubin-AIYyM
+          else
+            echo "No new CVs generated today."
+          fi
+
+      - name: Save updated Gmail token
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Refresh token may have been updated — write it back to the secret
+          # (requires a Personal Access Token with secrets:write scope stored as GH_PAT)
+          echo "Gmail token refresh handled on next run via google-auth auto-refresh."
